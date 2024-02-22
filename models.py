@@ -84,44 +84,55 @@ class SEBlock(nn.Module):
 
 
 class AttentionBlock(nn.Module):
-    def __init__(self, ch_in_small, ch_in_big, reduction_ratio=16):
-        super().__init__()
-        
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.max_pool = nn.AdaptiveMaxPool2d(1)
-        
-        # Channel-wise attention
-        self.fc = nn.Sequential(
-            nn.Conv2d(ch_in_small, ch_in_small // reduction_ratio, kernel_size=1),
+    def __init__(self, ch_in, ch_out):
+        super(AttentionBlock, self).__init__()
+        self.channel_attention = ChannelAttention(ch_in)
+        self.spatial_attention = SpatialAttention(ch_in)
+        self.conv = nn.Sequential(
+            nn.AdaptiveAvgPool2d(4),
+            nn.Conv2d(ch_in, ch_out, 4, 1, 0, bias=False),
             nn.ReLU(inplace=True),
-            nn.Conv2d(ch_in_small // reduction_ratio, ch_in_big, kernel_size=1),
+            nn.Conv2d(ch_out, ch_out, 1, 1, 0, bias=False),
             nn.Sigmoid()
         )
-        
-        # Spatial attention
-        self.conv_spatial = nn.Conv2d(2, 1, kernel_size=7, padding=3)
-        
+
     def forward(self, feat_small, feat_big):
-        # Channel-wise attention
-        avg_pool_feat_small = self.avg_pool(feat_small)
-        max_pool_feat_small = self.max_pool(feat_small)
-        channel_att = self.fc(avg_pool_feat_small) * self.fc(max_pool_feat_small)
-        
-        # Spatial attention
-        spatial_att = torch.cat([avg_pool_feat_small, max_pool_feat_small], dim=1)
-        spatial_att = self.conv_spatial(spatial_att)
-        spatial_att = torch.sigmoid(spatial_att)
-        
-        # Combine attentions
+        channel_att = self.channel_attention(feat_small)
+        spatial_att = self.spatial_attention(feat_small)
         att = channel_att * spatial_att
-        
-        # Upsample attention to match feat_big size
-        att = nn.functional.interpolate(att, size=feat_big.size()[2:], mode='bilinear', align_corners=False)
-        
-        # Apply attention to feat_big
-        feat_big_att = feat_big * att
-        
-        return feat_big_att
+        feat_small_att = feat_small * att
+        return feat_big * self.conv(feat_small_att)
+
+class ChannelAttention(nn.Module):
+    def __init__(self, ch_in, reduction=16):
+        super(ChannelAttention, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Conv2d(ch_in, ch_in // reduction, 1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(ch_in // reduction, ch_in, 1, bias=False),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        avg_out = self.fc(self.avg_pool(x))
+        max_out = self.fc(self.max_pool(x))
+        return avg_out + max_out
+
+
+class SpatialAttention(nn.Module):
+    def __init__(self, ch_in):
+        super(SpatialAttention, self).__init__()
+        self.conv = nn.Conv2d(2, 1, kernel_size=7, padding=3, bias=False)  
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        avg_out = torch.mean(x, dim=1, keepdim=True)  
+        max_out, _ = torch.max(x, dim=1, keepdim=True)  
+        x = torch.cat([avg_out, max_out], dim=1)  
+        x = self.conv(x)
+        return self.sigmoid(x)
 
 class InitLayer(nn.Module):
     def __init__(self, nz, channel):
